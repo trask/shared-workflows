@@ -777,6 +777,56 @@ class ProcessAuthorFollowUpsTest(unittest.TestCase):
         self.assertIn("[dashboard status comment]", body)
         self.assertIn(process_author_follow_ups.GENERAL_NUDGE_MARKER_PREFIX, body)
 
+    @patch.object(process_author_follow_ups, "post_comment")
+    @patch.object(process_author_follow_ups, "ensure_status_comment")
+    @patch.object(process_author_follow_ups, "current_human_activity")
+    @patch.object(process_author_follow_ups, "current_author_route")
+    @patch.object(process_author_follow_ups, "issue_details")
+    @patch.object(
+        process_author_follow_ups,
+        "lifecycle_comments",
+        return_value=[
+            {
+                "body": process_author_follow_ups.lifecycle_marker(
+                    process_author_follow_ups.GENERAL_NUDGE_MARKER_PREFIX,
+                    "2026-06-01T00:00:00+00:00",
+                ),
+                "created_at": "2026-06-08T00:00:00Z",
+            }
+        ],
+    )
+    def test_existing_nudge_from_previous_route_cycle_prevents_duplicate(
+        self,
+        _lifecycle_comments,
+        issue_details,
+        current_author_route,
+        current_human_activity,
+        ensure_status_comment,
+        post_comment,
+    ) -> None:
+        updated = follow_up_entry(
+            waiting_on_author_since="2026-07-10T00:00:00+00:00",
+            general_nudged_at="2026-07-17T00:00:00+00:00",
+        )
+
+        result = process_author_follow_ups.execute_action(
+            "general-nudge",
+            "open-telemetry/example",
+            1,
+            author_result(),
+            None,
+            updated,
+            NOW,
+        )
+
+        assert result is not None
+        self.assertEqual(result["general_nudged_at"], "2026-06-08T00:00:00Z")
+        issue_details.assert_not_called()
+        current_author_route.assert_not_called()
+        current_human_activity.assert_not_called()
+        ensure_status_comment.assert_not_called()
+        post_comment.assert_not_called()
+
     def test_transient_dashboard_failure_preserves_cycle(self) -> None:
         previous = follow_up_entry()
 
@@ -852,6 +902,19 @@ class ProcessAuthorFollowUpsTest(unittest.TestCase):
         )
 
         self.assertEqual(updated, {"1": selected, "2": unselected})
+
+    def test_missing_pr_preserves_lifetime_nudge_marker(self) -> None:
+        updated = process_author_follow_ups.next_author_follow_ups(
+            "open-telemetry/example",
+            {},
+            {"1": follow_up_entry()},
+            NOW,
+        )
+
+        self.assertEqual(
+            updated,
+            {"1": {"general_nudged_at": "2026-07-08T00:00:00+00:00"}},
+        )
 
 
 if __name__ == "__main__":

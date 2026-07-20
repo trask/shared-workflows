@@ -17,6 +17,7 @@ from dashboard import (
     backfill_failed_pr_numbers,
     complete_initial_backfill_if_ready,
     compute_facts,
+    fetch_pr_raw,
     group_review_threads,
     main,
     remove_cached_dashboard_prs,
@@ -26,6 +27,61 @@ from dashboard import (
     write_initial_backfill_output,
     write_refreshed_pr_numbers_output,
 )
+
+
+class FetchPrRawTest(unittest.TestCase):
+    def test_uses_graphql_issue_comments_without_rest_join(self) -> None:
+        issue_comments = [{"id": 101, "body": "GraphQL comment"}]
+        rest_payloads = {
+            "/repos/owner/repo/pulls/7/comments?per_page=100": [
+                {"id": 201, "body": "Review comment"}
+            ],
+            "/repos/owner/repo/pulls/7/commits?per_page=100": [
+                {"sha": "abcdef123456"}
+            ],
+        }
+
+        def gh_api(path: str, paginate: bool) -> list[dict]:
+            self.assertTrue(paginate)
+            return rest_payloads[path]
+
+        with (
+            patch(
+                "dashboard.gh_pr_view",
+                return_value={"id": "PR_node", "baseRefName": "main"},
+            ),
+            patch(
+                "dashboard.fetch_pr_issue_comments",
+                return_value=issue_comments,
+            ) as fetch_issue_comments,
+            patch("dashboard.gh_api", side_effect=gh_api) as rest_api,
+            patch("dashboard.fetch_review_threads", return_value=[]),
+            patch(
+                "dashboard.fetch_pr_review_data",
+                return_value={"reviews": [], "pr_metadata": {}},
+            ),
+            patch(
+                "dashboard.gh_pr_check_rollup",
+                return_value={"required": [], "non_blocking_failures": []},
+            ),
+            patch("dashboard.gh_required_check_contexts", return_value=[]),
+            patch("dashboard.include_missing_required_checks", return_value=[]),
+        ):
+            raw = fetch_pr_raw(
+                "owner/repo",
+                "owner",
+                "repo",
+                {"number": 7},
+                [],
+            )
+
+        self.assertEqual(raw["issue_comments"], issue_comments)
+        fetch_issue_comments.assert_called_once_with("owner", "repo", 7)
+        self.assertEqual(rest_api.call_count, 2)
+        self.assertEqual(
+            {call.args[0] for call in rest_api.call_args_list},
+            set(rest_payloads),
+        )
 
 
 class ReviewThreadDiscussionUrlTest(unittest.TestCase):
@@ -220,7 +276,7 @@ class StatusCommentQueueTest(unittest.TestCase):
         merge_update: Mock,
         enqueue_update: Mock,
         _save_state: Mock,
-        _clear_failure: Mock,
+        _clear_backfill_failure: Mock,
     ) -> None:
         calculation = DashboardUpdate(results={}, dashboard_state={}, trigger_pr_result={})
         merge_update.return_value = (calculation, False)
@@ -239,7 +295,7 @@ class StatusCommentQueueTest(unittest.TestCase):
         merge_update: Mock,
         enqueue_update: Mock,
         _save_state: Mock,
-        _clear_failure: Mock,
+        _clear_backfill_failure: Mock,
     ) -> None:
         calculation = DashboardUpdate(results={}, dashboard_state={}, trigger_pr_result={})
         merge_update.return_value = (calculation, True)
@@ -251,6 +307,32 @@ class StatusCommentQueueTest(unittest.TestCase):
 
 
 class RequiredCiRoutingTest(unittest.TestCase):
+    def test_non_blocking_check_failures_use_deterministic_casefold_tiebreaker(self) -> None:
+        facts = compute_facts(
+            {
+                "pr": {
+                    "updatedAt": "2026-07-14T03:00:00Z",
+                    "createdAt": "2026-07-14T01:00:00Z",
+                    "author": {"login": "author"},
+                    "assignees": [],
+                    "mergeStateStatus": "CLEAN",
+                    "mergeable": "MERGEABLE",
+                },
+                "checks": [],
+                "non_blocking_check_failures": [
+                    {"name": "codeql", "bucket": "fail"},
+                    {"name": "CodeQL", "bucket": "fail"},
+                ],
+            },
+            "author",
+            [],
+        )
+
+        self.assertEqual(
+            ["CodeQL", "codeql"],
+            facts["non_blocking_check_failures"],
+        )
+
     def test_required_check_buckets_control_ci_facts_and_author_routing(self) -> None:
         cases = (
             ("TIMED_OUT", "fail", 1, 0, "author"),
@@ -274,6 +356,9 @@ class RequiredCiRoutingTest(unittest.TestCase):
                             "mergeable": "MERGEABLE",
                         },
                         "checks": [{"state": state, "bucket": bucket}],
+                        "non_blocking_check_failures": [
+                            {"name": "workflow-notification", "bucket": "fail"},
+                        ],
                     },
                     "author",
                     [],
@@ -281,6 +366,10 @@ class RequiredCiRoutingTest(unittest.TestCase):
 
                 self.assertEqual(failing, facts["ci_failing_count"])
                 self.assertEqual(pending, facts["ci_pending_count"])
+                self.assertEqual(
+                    ["workflow-notification"],
+                    facts["non_blocking_check_failures"],
+                )
                 self.assertEqual(route, route_pr(facts, {}, 1))
 
     def test_required_ci_failure_routes_to_author_before_approval_state(self) -> None:
@@ -365,6 +454,7 @@ class BackfillFailureIsolationTest(unittest.TestCase):
             model="model",
             required_approvals=1,
             github_output=github_output,
+            non_blocking_check_pattern=[],
         )
         dashboard_state = {
             "initial_backfill_complete": False,
@@ -385,7 +475,7 @@ class BackfillFailureIsolationTest(unittest.TestCase):
 
         def build_update(*call_args) -> DashboardUpdate:
             pr_number = call_args[5]
-            starting_state = call_args[8]
+            starting_state = call_args[9]
             refreshed_pr_numbers.append(pr_number)
             result = {
                 "pr_number": pr_number,

@@ -63,9 +63,13 @@ def lifecycle_comments(repo: str, pr_number: int) -> list[dict[str, Any]]:
     ]
 
 
-def matching_comment(comments: list[dict[str, Any]], marker: str) -> dict[str, Any] | None:
+def existing_nudge_comment(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next(
-        (comment for comment in comments if marker in (comment.get("body") or "")),
+        (
+            comment
+            for comment in comments
+            if GENERAL_NUDGE_MARKER_PREFIX in (comment.get("body") or "")
+        ),
         None,
     )
 
@@ -249,8 +253,7 @@ def execute_action(
     if action != "general-nudge":
         raise ValueError(f"unsupported author follow-up action: {action}")
     cycle_id = updated.get("waiting_on_author_since") or format_ts(now)
-    marker = lifecycle_marker(GENERAL_NUDGE_MARKER_PREFIX, cycle_id)
-    existing = matching_comment(lifecycle_comments(repo, pr_number), marker)
+    existing = existing_nudge_comment(lifecycle_comments(repo, pr_number))
     if existing:
         updated["general_nudged_at"] = existing.get("created_at") or format_ts(now)
         return updated
@@ -328,6 +331,10 @@ def next_author_follow_ups(
         ):
             updated_follow_ups[key] = previous
             continue
+        if previous.get("general_nudged_at"):
+            updated_follow_ups[key] = {
+                "general_nudged_at": previous["general_nudged_at"]
+            }
     return updated_follow_ups
 
 
