@@ -202,7 +202,8 @@ who are not yet familiar with that comment to the remaining items.
 The nudge applies only while the PR is in *Waiting on authors*: if the PR leaves
 that route before the week elapses, the clock resets. It is posted at most once
 per PR, and a PR that has already been nudged is never nudged again even if it
-leaves and later returns to *Waiting on authors*.
+leaves and later returns to *Waiting on authors*, including after it is closed,
+drafted, or reopened.
 
 ## Configuration
 
